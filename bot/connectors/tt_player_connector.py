@@ -21,33 +21,52 @@ class TTPlayerConnector(Thread):
 
     def run(self):
         last_player_state = State.Stopped
+        # Matches the Stopped state's status text, so a fresh, idle bot does not
+        # issue a redundant status update before anything plays.
+        last_status_text = ""
         self._close = False
         while not self._close:
             try:
-                # A generic, stable status; the title of the current media is
-                # available on demand via the "t" command instead of being pushed
-                # into the status (which is noisy for e.g. radio streams).
-                if self.player.state != last_player_state:
-                    last_player_state = self.player.state
-                    if self.player.state == State.Playing:
+                state = self.player.state
+                # Voice transmission only flips on a real state change.
+                if state != last_player_state:
+                    last_player_state = state
+                    if state == State.Playing:
                         for ttclient in self.ttclients:
                             ttclient.enable_voice_transmission()
-                            ttclient.change_status_text(
-                                self.translator.translate("Streaming media")
-                            )
-                    elif self.player.state == State.Stopped:
+                    else:
                         for ttclient in self.ttclients:
                             ttclient.disable_voice_transmission()
-                            ttclient.change_status_text("")
-                    elif self.player.state == State.Paused:
-                        for ttclient in self.ttclients:
-                            ttclient.disable_voice_transmission()
-                            ttclient.change_status_text(
-                                self.translator.translate("Paused")
-                            )
+
+                # The status text is recomputed every tick, not just on a state
+                # change, so it follows track changes while playback stays in the
+                # Playing state (e.g. advancing through a playlist).
+                status_text = self._status_text(state)
+                if status_text != last_status_text:
+                    last_status_text = status_text
+                    for ttclient in self.ttclients:
+                        ttclient.change_status_text(status_text)
             except Exception:
                 logging.error("", exc_info=True)
             time.sleep(app_vars.loop_timeout)
+
+    def _status_text(self, state: State) -> str:
+        """The TeamTalk status to show for the current player state.
+
+        While playing, show the current media's title (its URL if untitled, as
+        the "t" command does), falling back to a generic label if neither is
+        known yet. An empty string resets the client to its default status.
+        """
+        if state == State.Playing:
+            track = self.player.track
+            return (
+                track.name
+                or track.url
+                or self.translator.translate("Streaming media")
+            )
+        if state == State.Paused:
+            return self.translator.translate("Paused")
+        return ""
 
     def close(self):
         self._close = True
