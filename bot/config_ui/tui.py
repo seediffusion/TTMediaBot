@@ -24,6 +24,7 @@ from bot.config_ui.wizard import (
     SERVICES,
     Field,
     WizardState,
+    plain_label,
 )
 
 
@@ -98,21 +99,23 @@ def ask_choice(label: str, options: List[str], default_index: int = 0, help_text
 
 
 def _ask_field(fld: Field, current: object) -> object:
+    # Labels carry wx mnemonics for the GUI; strip them before printing.
+    label = plain_label(fld.label)
     if fld.kind == "int":
-        return ask_int(fld.label, int(current), fld.help)
+        return ask_int(label, int(current), fld.help)
     if fld.kind == "bool":
-        return ask_bool(fld.label, bool(current), fld.help)
+        return ask_bool(label, bool(current), fld.help)
     if fld.kind == "list":
         default_str = ", ".join(current) if isinstance(current, list) else str(current)
-        raw = ask_text(fld.label, default_str, fld.help)
+        raw = ask_text(label, default_str, fld.help)
         return wizard.parse_admins(raw)
     if fld.kind == "args":
         default_str = wizard.format_args(current) if isinstance(current, list) else str(current)
-        raw = ask_text(fld.label, default_str, fld.help)
+        raw = ask_text(label, default_str, fld.help)
         return wizard.parse_args(raw)
     if fld.kind == "secret":
-        return ask_text(fld.label, str(current), fld.help, secret=True)
-    return ask_text(fld.label, str(current), fld.help)
+        return ask_text(label, str(current), fld.help, secret=True)
+    return ask_text(label, str(current), fld.help)
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +233,12 @@ def _configure_services(state: WizardState) -> None:
             default_index = 0
         labels = {s.key: s.label for s in SERVICES}
         choice = ask_choice(
-            "Default service (used when a request has no explicit service)",
+            "Service used for searches",
             [labels[k] for k in enabled_services],
             default_index,
+            "Which service the play command searches at startup. URLs are always "
+            "matched to a service by their address, so this does not affect them. "
+            "Users can switch service at any time with the sv command.",
         )
         state.default_service = enabled_services[choice]
 

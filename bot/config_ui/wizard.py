@@ -27,7 +27,7 @@ import os
 import shlex
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from bot import app_vars
 from bot.config.models import (
@@ -48,13 +48,42 @@ DEFAULT_CONFIG_PATH = os.path.join(app_vars.directory, "config.json")
 # Both front ends iterate these descriptors so the labels, defaults and help
 # text are defined exactly once.
 # ---------------------------------------------------------------------------
+def plain_label(label: str) -> str:
+    """Strip mnemonic markers and a trailing colon from a label.
+
+    Labels carry wx mnemonics (``&``) so the GUI and the terminal wizard can
+    share one set of strings.  ``&&`` is wx's escape for a literal ampersand and
+    collapses to one; a lone ``&`` is the marker and is dropped.  The terminal
+    wizard runs every label through this before printing, and the GUI uses it for
+    accessible names.
+    """
+    out = []
+    i = 0
+    while i < len(label):
+        if label[i] == "&":
+            # "&&" is a literal ampersand; a lone "&" marks the mnemonic.
+            if i + 1 < len(label) and label[i + 1] == "&":
+                out.append("&")
+                i += 2
+                continue
+            i += 1
+            continue
+        out.append(label[i])
+        i += 1
+    return "".join(out).rstrip(":").strip()
+
+
 @dataclass
 class Field:
-    """A single question shown by both front ends."""
+    """A single question shown by both front ends.
+
+    ``label`` may contain a wx mnemonic marker (``&``); the terminal wizard
+    strips it with :func:`plain_label`.
+    """
 
     key: str
     label: str
-    kind: str  # "text" | "secret" | "int" | "bool" | "list"
+    kind: str  # "text" | "secret" | "int" | "bool" | "list" | "args"
     default: Any
     help: str = ""
 
@@ -63,26 +92,31 @@ class Field:
 _TT_DEFAULTS = TeamTalkModel()
 
 SERVER_FIELDS: List[Field] = [
-    Field("hostname", "Server address (hostname)", "text", _TT_DEFAULTS.hostname,
-          "The address of the TeamTalk server, e.g. tt.example.com."),
-    Field("tcp_port", "TCP port", "int", _TT_DEFAULTS.tcp_port,
+    Field("hostname", "Server &address", "text", _TT_DEFAULTS.hostname,
+          "The hostname or IP address of the TeamTalk server, "
+          "e.g. tt.example.com."),
+    Field("tcp_port", "&TCP port", "int", _TT_DEFAULTS.tcp_port,
           "Usually 10333."),
-    Field("udp_port", "UDP port", "int", _TT_DEFAULTS.udp_port,
+    Field("udp_port", "&UDP port", "int", _TT_DEFAULTS.udp_port,
           "Usually the same as the TCP port."),
-    Field("encrypted", "Use an encrypted connection", "bool", _TT_DEFAULTS.encrypted,
+    Field("encrypted", "Use an &encrypted connection", "bool", _TT_DEFAULTS.encrypted,
           "Enable only if the server requires encryption."),
-    Field("nickname", "Bot nickname", "text", _TT_DEFAULTS.nickname,
+    Field("nickname", "Bot &nickname", "text", _TT_DEFAULTS.nickname,
           "The display name the bot shows in the channel."),
-    Field("username", "Login username", "text", _TT_DEFAULTS.username,
+    Field("username", "Lo&gin username", "text", _TT_DEFAULTS.username,
           "The account the bot logs in with. Leave blank for a guest login."),
-    Field("password", "Login password", "secret", _TT_DEFAULTS.password,
+    Field("password", "Login &password", "secret", _TT_DEFAULTS.password,
           "The password for the login account. Leave blank if none."),
-    Field("channel", "Channel to join", "text", str(_TT_DEFAULTS.channel),
-          'A channel path such as "/" (root) or "/Music".'),
-    Field("channel_password", "Channel password", "secret", _TT_DEFAULTS.channel_password,
+    Field("channel", "Channel to &join (path or ID)", "text", str(_TT_DEFAULTS.channel),
+          'A channel path such as "/" (root) or "/Music", or a numeric channel '
+          "ID. If the path does not exist the bot joins the root channel."),
+    Field("channel_password", "Channel pass&word", "secret", _TT_DEFAULTS.channel_password,
           "Leave blank if the channel has no password."),
-    Field("admins", "Admin usernames", "list", list(_TT_DEFAULTS.users.admins),
-          "Comma separated usernames allowed to run admin commands."),
+    Field("admins", "Ad&min usernames (comma separated)", "list",
+          list(_TT_DEFAULTS.users.admins),
+          "Comma separated TeamTalk account usernames (not nicknames) allowed to "
+          "run admin commands. TeamTalk server administrators always have "
+          "access, whether or not they are listed here."),
 ]
 
 
@@ -97,24 +131,31 @@ _VK_DEFAULTS = VkModel()
 _YAM_DEFAULTS = YamModel()
 _YT_DEFAULTS = YtModel()
 
+# ``ServiceSpec.label`` must stay free of mnemonic markers: it is also used
+# verbatim as the items of the "Default service" wx.Choice, which would render a
+# literal "&".  The GUI adds mnemonics to the per-service "Enable" checkboxes.
 SERVICES: List[ServiceSpec] = [
     ServiceSpec("vk", "VK (VKontakte)", [
-        Field("token", "VK API token", "secret", _VK_DEFAULTS.token,
+        Field("token", "V&K API token", "secret", _VK_DEFAULTS.token,
               "Paste your VK API token. Leave blank to configure it later."),
     ]),
     ServiceSpec("yam", "Yandex Music", [
-        Field("token", "Yandex Music token", "secret", _YAM_DEFAULTS.token,
+        Field("token", "Yandex &Music token", "secret", _YAM_DEFAULTS.token,
               "Paste your Yandex Music token. Leave blank to configure it later."),
     ]),
     ServiceSpec("yt", "YouTube", [
-        Field("yt_dlp_path", "Path to the yt-dlp program", "text", _YT_DEFAULTS.yt_dlp_path,
+        Field("yt_dlp_path", "Path to the yt-&dlp program", "text", _YT_DEFAULTS.yt_dlp_path,
               'Path to the yt-dlp binary, e.g. "/home/user/cider/yt-dlp", or just '
               '"yt-dlp" if it is on the system PATH.'),
-        Field("cookiefile_path", "Path to a cookies.txt file", "text", _YT_DEFAULTS.cookiefile_path,
+        Field("cookiefile_path", "Path to a c&ookies.txt file", "text",
+              _YT_DEFAULTS.cookiefile_path,
               "Optional. A YouTube cookies file helps with age or bot gated videos. "
-              "Leave blank for none."),
-        Field("extra_args", "Extra yt-dlp arguments", "args", list(_YT_DEFAULTS.extra_args),
-              "Advanced, optional. Extra command-line arguments passed to yt-dlp, "
+              "Leave blank for none. If the file does not exist it is ignored "
+              "without warning."),
+        Field("extra_args", "Extra yt-dlp ar&guments", "args",
+              list(_YT_DEFAULTS.extra_args),
+              "Advanced, optional. Added to every yt-dlp call, including "
+              "downloads. Quote any value containing spaces, "
               "e.g.  --js-runtimes deno:/home/user/.deno/bin/deno"),
     ]),
 ]
@@ -273,7 +314,7 @@ def build_server(values: Dict[str, Any], base: Optional[TeamTalkModel] = None) -
     data["nickname"] = values["nickname"]
     data["username"] = values["username"]
     data["password"] = values["password"]
-    data["channel"] = values["channel"]
+    data["channel"] = parse_channel(values["channel"])
     data["channel_password"] = values["channel_password"]
     data.setdefault("users", {})
     data["users"]["admins"] = list(values["admins"])
@@ -344,6 +385,21 @@ def load_config(path: str) -> ConfigModel:
     with open(path, "r", encoding="UTF-8") as f:
         data = json.load(f)
     return ConfigModel(**data)
+
+
+def parse_channel(raw: Any) -> Union[int, str]:
+    """Coerce a channel answer back to the ``Union[int, str]`` the model stores.
+
+    ``TeamTalk.join`` treats an ``int`` as a channel ID and anything else as a
+    path to look up (``bot/TeamTalk/__init__.py``).  The editors show the value
+    as text, so a numeric ID would come back as ``"5"`` and be looked up as a
+    path -- which fails, silently landing the bot in the root channel.  Channel
+    paths always start with "/", so an all-digit answer is unambiguously an ID.
+    """
+    if isinstance(raw, int):
+        return raw
+    text = str(raw).strip()
+    return int(text) if text.isdigit() else text
 
 
 def parse_admins(raw: str) -> List[str]:

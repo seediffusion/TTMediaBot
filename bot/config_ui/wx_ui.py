@@ -14,7 +14,7 @@ GUI front end has been selected, so headless installs never need wxPython.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import wx
 
@@ -23,12 +23,23 @@ from pydantic import ValidationError
 from bot import app_vars
 from bot.config.models import TeamTalkModel
 from bot.config_ui import wizard
-from bot.config_ui.wizard import SERVER_FIELDS, SERVICES, Field, WizardState
+from bot.config_ui.wizard import (
+    SERVER_FIELDS,
+    SERVICES,
+    Field,
+    WizardState,
+    plain_label,
+)
 
 
-def _plain(label: str) -> str:
-    """Strip mnemonic markers and a trailing colon for an accessible name."""
-    return label.replace("&", "").rstrip(":").strip()
+# Mnemonics for the per-service "Enable" checkboxes.  They live here rather than
+# in ``ServiceSpec.label`` because that label is also used verbatim as an item of
+# the "Default service" choice, where a "&" would be rendered literally.
+ENABLE_LABELS: Dict[str, str] = {
+    "vk": "Ena&ble VK (VKontakte)",
+    "yam": "Enable &Yandex Music",
+    "yt": "Enable Yo&uTube",
+}
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -39,17 +50,29 @@ def _format_errors(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def _add_labeled(parent: wx.Window, sizer: wx.Sizer, label: str, ctrl: wx.Window,
+def _add_labeled(parent: wx.Window, sizer: wx.Sizer, label: str,
+                 make_ctrl: Callable[[wx.Window], wx.Window],
                  help_text: str = "") -> wx.Window:
-    """Add a StaticText label above ``ctrl`` and give the control an accessible name.
+    """Create a StaticText label, then the control it names, and add both.
 
-    The label is placed immediately before the control in tab order (so screen
-    readers associate them and the label's mnemonic focuses the control), and
-    ``SetName`` sets the control's accessible Name for robustness.
+    ``make_ctrl`` is a factory rather than a ready-made control, and that is the
+    whole point: on MSW a control with no native label of its own (EDIT,
+    COMBOBOX, LISTBOX) takes its accessible name from the nearest *preceding*
+    Static in the real Win32 HWND z-order, and that z-order follows the order
+    the windows were created in.  Building the control first -- as is the natural
+    thing to write -- puts every label *after* the control it names, so each
+    field ends up announced with the previous field's label and the first field
+    has no name at all.  Creating the label first is what actually fixes it.
+
+    Note that ``wxWindow.MoveAfterInTabOrder`` does *not* fix this: it reorders
+    wx's own child list, which leaves the underlying HWND z-order (the thing
+    MSAA reads) untouched.  ``SetName`` is likewise only a partial backstop, so
+    neither is a substitute for creating the windows in the right order.
     """
     static = wx.StaticText(parent, label=label)
     sizer.Add(static, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
-    ctrl.SetName(_plain(label))
+    ctrl = make_ctrl(parent)
+    ctrl.SetName(plain_label(label))
     if help_text:
         ctrl.SetToolTip(help_text)
         ctrl.SetHelpText(help_text)
@@ -102,7 +125,6 @@ class ServerDialog(wx.Dialog):
         if fld.kind == "bool":
             ctrl = wx.CheckBox(panel, label=fld.label)
             ctrl.SetValue(bool(value))
-            ctrl.SetName(_plain(fld.label))
             if fld.help:
                 ctrl.SetToolTip(fld.help)
                 ctrl.SetHelpText(fld.help)
@@ -113,12 +135,14 @@ class ServerDialog(wx.Dialog):
             text = ", ".join(value)
         else:
             text = str(value)
-        ctrl = wx.TextCtrl(panel, value=text, style=style)
-        _add_labeled(panel, sizer, f"{fld.label}:", ctrl, fld.help)
-        return ctrl
+        return _add_labeled(
+            panel, sizer, f"{fld.label}:",
+            lambda p: wx.TextCtrl(p, value=text, style=style),
+            fld.help,
+        )
 
     def _error(self, message: str, focus: Optional[wx.Window]) -> None:
-        wx.MessageBox(message, "Please fix this", wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(message, "Invalid server settings", wx.OK | wx.ICON_ERROR, self)
         if focus is not None:
             focus.SetFocus()
 
@@ -133,7 +157,7 @@ class ServerDialog(wx.Dialog):
                 try:
                     collected[fld.key] = int(raw)
                 except ValueError:
-                    self._error(f"{_plain(fld.label)} must be a whole number.", ctrl)
+                    self._error(f"{plain_label(fld.label)} must be a whole number.", ctrl)
                     return
             elif fld.kind == "list":
                 collected[fld.key] = wizard.parse_admins(ctrl.GetValue())
@@ -177,7 +201,7 @@ class WizardFrame(wx.Frame):
                 except (ValidationError, ValueError, OSError) as exc:
                     wx.MessageBox(
                         f"Could not read the existing file:\n{exc}\n\nStarting fresh.",
-                        "Warning",
+                        "Could not read the existing configuration",
                         wx.OK | wx.ICON_WARNING,
                         self,
                     )
@@ -191,7 +215,9 @@ class WizardFrame(wx.Frame):
 
         panel = wx.Panel(self)
         self.notebook = wx.Notebook(panel)
-        self.notebook.SetName("Configuration steps")
+        # Freely navigable pages, not an ordered sequence: do not call these
+        # "steps", which would imply a Next button that does not exist.
+        self.notebook.SetName("Configuration sections")
         self.notebook.AddPage(self._build_general_page(), "General")
         self.notebook.AddPage(self._build_servers_page(), "Servers")
         self.notebook.AddPage(self._build_sound_page(), "Sound devices")
@@ -224,33 +250,30 @@ class WizardFrame(wx.Frame):
         page = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.languages = wizard.get_available_languages()
-        self.lang_choice = wx.Choice(page, choices=self.languages)
+        self.lang_choice = _add_labeled(
+            page, sizer, "&Interface language:",
+            lambda p: wx.Choice(p, choices=self.languages),
+            "The language Cider uses for its messages.",
+        )
         try:
             self.lang_choice.SetSelection(self.languages.index(self._state.language))
         except ValueError:
             self.lang_choice.SetSelection(0)
-        _add_labeled(
-            page, sizer, "&Language:", self.lang_choice,
-            "The language Cider uses for its messages.",
-        )
         page.SetSizer(sizer)
         return page
 
     def _build_servers_page(self) -> wx.Window:
         page = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(
-            wx.StaticText(
-                page,
-                label="TeamTalk servers the bot will connect to "
-                "(at least one is required):",
-            ),
-            0, wx.ALL, 6,
+        self.server_list = _add_labeled(
+            page, sizer, "Configured ser&vers:",
+            lambda p: wx.ListBox(p, style=wx.LB_SINGLE),
+            "TeamTalk servers the bot will connect to. At least one is required.",
         )
-        self.server_list = wx.ListBox(page, style=wx.LB_SINGLE)
-        self.server_list.SetName("Configured servers")
         self.server_list.Bind(wx.EVT_LISTBOX_DCLICK, lambda e: self._edit_server())
-        sizer.Add(self.server_list, 1, wx.EXPAND | wx.ALL, 6)
+        # _add_labeled adds controls at a fixed height; the list should take the
+        # leftover vertical space instead.
+        sizer.GetItem(self.server_list).SetProportion(1)
 
         row = wx.BoxSizer(wx.HORIZONTAL)
         add = wx.Button(page, label="&Add server...")
@@ -274,13 +297,13 @@ class WizardFrame(wx.Frame):
         self.out_choice: Optional[wx.Choice] = None
         self.out_spin: Optional[wx.SpinCtrl] = None
         if out_names:
-            self.out_choice = wx.Choice(page, choices=out_names)
-            idx = self._state.output_device_index
-            self.out_choice.SetSelection(idx if 0 <= idx < len(out_names) else 0)
-            _add_labeled(
-                page, sizer, "&Player output device:", self.out_choice,
+            self.out_choice = _add_labeled(
+                page, sizer, "&Player output device:",
+                lambda p: wx.Choice(p, choices=out_names),
                 "Where Cider sends the audio it plays.",
             )
+            idx = self._state.output_device_index
+            self.out_choice.SetSelection(idx if 0 <= idx < len(out_names) else 0)
         else:
             sizer.Add(
                 wx.StaticText(
@@ -291,21 +314,25 @@ class WizardFrame(wx.Frame):
                 ),
                 0, wx.ALL, 6,
             )
-            self.out_spin = wx.SpinCtrl(page, min=0, max=999, initial=self._state.output_device_index)
-            _add_labeled(page, sizer, "Output device &index:", self.out_spin)
+            self.out_spin = _add_labeled(
+                page, sizer, "&Player output device index:",
+                lambda p: wx.SpinCtrl(p, min=0, max=999,
+                                      initial=self._state.output_device_index),
+                "Where Cider sends the audio it plays.",
+            )
 
         in_names, in_err = wizard.safe_enumerate_input_devices()
         self.in_choice: Optional[wx.Choice] = None
         self.in_spin: Optional[wx.SpinCtrl] = None
         if in_names:
-            self.in_choice = wx.Choice(page, choices=in_names)
-            idx = self._state.input_device_index
-            self.in_choice.SetSelection(idx if 0 <= idx < len(in_names) else 0)
-            _add_labeled(
-                page, sizer, "&TeamTalk input device:", self.in_choice,
+            self.in_choice = _add_labeled(
+                page, sizer, "&TeamTalk input device:",
+                lambda p: wx.Choice(p, choices=in_names),
                 "The device TeamTalk transmits from "
                 "(usually a virtual cable fed by the player output).",
             )
+            idx = self._state.input_device_index
+            self.in_choice.SetSelection(idx if 0 <= idx < len(in_names) else 0)
         else:
             sizer.Add(
                 wx.StaticText(
@@ -316,8 +343,13 @@ class WizardFrame(wx.Frame):
                 ),
                 0, wx.ALL, 6,
             )
-            self.in_spin = wx.SpinCtrl(page, min=0, max=999, initial=self._state.input_device_index)
-            _add_labeled(page, sizer, "Input device i&ndex:", self.in_spin)
+            self.in_spin = _add_labeled(
+                page, sizer, "&TeamTalk input device index:",
+                lambda p: wx.SpinCtrl(p, min=0, max=999,
+                                      initial=self._state.input_device_index),
+                "The device TeamTalk transmits from "
+                "(usually a virtual cable fed by the player output).",
+            )
 
         page.SetSizer(sizer)
         return page
@@ -330,9 +362,11 @@ class WizardFrame(wx.Frame):
         else:
             text = str(value)
         style = wx.TE_PASSWORD if fld.kind == "secret" else 0
-        ctrl = wx.TextCtrl(parent, value=text, style=style)
-        _add_labeled(parent, box, f"{fld.label}:", ctrl, fld.help)
-        return ctrl
+        return _add_labeled(
+            parent, box, f"{fld.label}:",
+            lambda p: wx.TextCtrl(p, value=text, style=style),
+            fld.help,
+        )
 
     def _build_services_page(self) -> wx.Window:
         page = wx.Panel(self.notebook)
@@ -341,11 +375,13 @@ class WizardFrame(wx.Frame):
         self.svc_fields: Dict[str, Dict[str, wx.Window]] = {}
 
         for spec in SERVICES:
-            box = wx.StaticBoxSizer(wx.VERTICAL, page, spec.label)
+            # The group is named "<service> settings" rather than just
+            # "<service>" so entering it does not announce the service name
+            # twice, once for the group and again for the checkbox inside it.
+            box = wx.StaticBoxSizer(wx.VERTICAL, page, f"{spec.label} settings")
             parent = box.GetStaticBox()
-            enable = wx.CheckBox(parent, label=f"Enable {spec.label}")
+            enable = wx.CheckBox(parent, label=ENABLE_LABELS[spec.key])
             enable.SetValue(self._state.service_enabled.get(spec.key, True))
-            enable.SetName(f"Enable {spec.label}")
             box.Add(enable, 0, wx.ALL, 6)
             self.svc_enable[spec.key] = enable
 
@@ -356,28 +392,50 @@ class WizardFrame(wx.Frame):
                 ctrl.Enable(enable.GetValue())
                 controls[fld.key] = ctrl
             self.svc_fields[spec.key] = controls
-            if controls:
-                # Enable/disable a service's fields together with its checkbox.
-                enable.Bind(
-                    wx.EVT_CHECKBOX,
-                    lambda e, cs=list(controls.values()): [c.Enable(e.IsChecked()) for c in cs],
-                )
+            # Toggling a service enables/disables its fields and adds or removes
+            # it from the "Default service" choice.
+            enable.Bind(wx.EVT_CHECKBOX, self._on_service_toggled)
             sizer.Add(box, 0, wx.EXPAND | wx.ALL, 6)
 
-        self._service_keys = [s.key for s in SERVICES]
-        self.default_choice = wx.Choice(page, choices=[s.label for s in SERVICES])
-        try:
-            self.default_choice.SetSelection(
-                self._service_keys.index(self._state.default_service)
-            )
-        except ValueError:
-            self.default_choice.SetSelection(0)
-        _add_labeled(
-            page, sizer, "De&fault service:", self.default_choice,
-            "Used when a request does not name a service.",
+        self._default_service = self._state.default_service
+        self._default_keys: List[str] = []
+        self.default_choice = _add_labeled(
+            page, sizer, "Service used for searc&hes:", wx.Choice,
+            "Which service the play command searches at startup. URLs are always "
+            "matched to a service by their address, so this does not affect them. "
+            "Users can switch service at any time with the sv command.",
         )
+        self._refresh_default_choice()
         page.SetSizer(sizer)
         return page
+
+    def _on_service_toggled(self, event: wx.CommandEvent) -> None:
+        for key, checkbox in self.svc_enable.items():
+            for ctrl in self.svc_fields[key].values():
+                ctrl.Enable(checkbox.GetValue())
+        self._refresh_default_choice()
+        event.Skip()
+
+    def _refresh_default_choice(self) -> None:
+        """List only enabled services, so the default can never name a disabled one."""
+        self._remember_default_service()
+        self._default_keys = [
+            s.key for s in SERVICES if self.svc_enable[s.key].GetValue()
+        ]
+        labels = {s.key: s.label for s in SERVICES}
+        self.default_choice.Set([labels[key] for key in self._default_keys])
+        if not self._default_keys:
+            return
+        try:
+            self.default_choice.SetSelection(self._default_keys.index(self._default_service))
+        except ValueError:
+            self.default_choice.SetSelection(0)
+
+    def _remember_default_service(self) -> None:
+        """Keep the last chosen service so it is restored if it is re-enabled."""
+        index = self.default_choice.GetSelection()
+        if index != wx.NOT_FOUND and index < len(self._default_keys):
+            self._default_service = self._default_keys[index]
 
     # --- server list actions -------------------------------------------
     def _refresh_server_list(self) -> None:
@@ -415,7 +473,9 @@ class WizardFrame(wx.Frame):
                           wx.OK | wx.ICON_INFORMATION, self)
             return
         if len(self.servers) == 1:
-            wx.MessageBox("At least one server is required.", "Cannot remove",
+            wx.MessageBox("This is the only configured server, and Cider needs "
+                          "at least one. Add another server before removing it.",
+                          "At least one server is required",
                           wx.OK | wx.ICON_WARNING, self)
             return
         del self.servers[index]
@@ -445,7 +505,10 @@ class WizardFrame(wx.Frame):
                     values[fld.key] = wizard.parse_args(ctrl.GetValue())
                 else:
                     values[fld.key] = ctrl.GetValue()
-        state.default_service = self._service_keys[self.default_choice.GetSelection()]
+        # Falls back to the remembered value when every service is disabled and
+        # the choice is therefore empty.
+        self._remember_default_service()
+        state.default_service = self._default_service
         return state
 
     def _on_save(self, event: wx.CommandEvent) -> None:
@@ -469,13 +532,14 @@ class WizardFrame(wx.Frame):
         try:
             wizard.write_config(config, self.config_path)
         except OSError as exc:
-            wx.MessageBox(f"Failed to write the file:\n{exc}", "Error",
+            wx.MessageBox(f"Failed to write the file:\n{exc}",
+                          "Could not save the configuration",
                           wx.OK | wx.ICON_ERROR, self)
             return
         wx.MessageBox(
             f"Configuration saved to:\n{self.config_path}\n\n"
             f"{len(state.servers)} server(s) configured. You can start the bot now.",
-            "Saved",
+            "Configuration saved",
             wx.OK | wx.ICON_INFORMATION,
             self,
         )
